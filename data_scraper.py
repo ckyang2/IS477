@@ -23,6 +23,8 @@ import time
 import sys
 from datetime import datetime
 from pathlib import Path
+from datetime import date
+import csv
 
 try:
     from config import (
@@ -221,3 +223,59 @@ def merge_datasets(df_debt: pd.DataFrame, df_ff_annual: pd.DataFrame) -> pd.Data
     merged = merged.drop(columns=["calendar_year"], errors="ignore")
     merged = merged[merged["fiscal_year"] >= 1977].reset_index(drop=True)
     return merged
+
+
+
+
+def fetch_federal_receipts(api_key: str, output_file) -> str:
+    """
+    Fetch US Federal Receipts (FYFR) from FRED API from 1977 to today
+    and write results to a CSV file.
+ 
+    Args:
+        output_file: Path/name of the output CSV file (default: 'federal_receipts.csv')
+ 
+    Returns:
+        Path to the written CSV file.
+    """
+    url = "https://api.stlouisfed.org/fred/series/observations"
+    params = {
+        "series_id":         "FYFR",
+        "api_key":           api_key,
+        "file_type":         "json",
+        "observation_start": "1977-01-01",
+        "observation_end":   date.today().isoformat(),
+        "units":             "lin",          # levels (billions of dollars)
+        "frequency":         "a",            # annual — FYFR is annual data
+        "sort_order":        "asc",
+    }
+ 
+    response = requests.get(url, params=params, timeout=15)
+    response.raise_for_status()
+ 
+    data = response.json()
+    observations = data.get("observations", [])
+ 
+    if not observations:
+        raise ValueError("No observations returned from FRED. Check your API key and series ID.")
+ 
+    with open(output_file, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=["date", "federal_receipts_billions_usd"])
+        writer.writeheader()
+        for obs in observations:
+            # FRED uses "." for missing values — skip them
+            if obs["value"] == ".":
+                continue
+            writer.writerow({
+                "date":                           obs["date"],
+                "federal_receipts_billions_usd":  obs["value"],
+            })
+ 
+    print(f"Done. {len(observations)} records written to '{output_file}'.")
+    return output_file
+ 
+ 
+# ── Example usage ──────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    YOUR_API_KEY = "YOUR_FRED_API_KEY_HERE"   # ← replace with your key
+    fetch_federal_receipts(api_key=YOUR_API_KEY, output_file="federal_receipts.csv")

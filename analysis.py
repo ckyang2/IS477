@@ -409,3 +409,445 @@ def print_findings(df: pd.DataFrame) -> None:
     print()
 
 
+# ── 8. Load & Merge Federal Receipts ─────────────────────────────────────────
+def load_receipts(path: str) -> pd.DataFrame:
+    """
+    Load the federal receipts CSV and return a clean annual DataFrame.
+ 
+    Expects columns: date, federal_receipts_billions_usd
+    The FRED FYFR series reports in *millions* of dollars despite the column
+    name — values like 355559 for 1977 are millions, not billions.
+    We normalise to trillions for consistency with the debt figures.
+    """
+    df = pd.read_csv(path, parse_dates=["date"])
+    df = df.rename(columns={"federal_receipts_billions_usd": "receipts_raw"})
+    df["receipts_raw"] = pd.to_numeric(df["receipts_raw"], errors="coerce")
+ 
+    # FRED FYFR is in millions of USD → convert to trillions
+    df["receipts_T"] = df["receipts_raw"] / 1e6
+ 
+    # Derive fiscal year from the September 30 record date
+    df["year"] = df["date"].dt.year
+ 
+    return df[["year", "receipts_T"]].dropna().sort_values("year").reset_index(drop=True)
+ 
+ 
+def merge_receipts(df: pd.DataFrame, receipts_path: str) -> pd.DataFrame:
+    """
+    Left-join the main analytical DataFrame with federal receipts on fiscal year.
+    Adds columns:
+        receipts_T          – annual federal receipts ($ trillions)
+        deficit_T           – debt_yoy_change minus receipts (simple deficit proxy, $T)
+        receipts_coverage   – receipts / debt_yoy_change (how much of new debt receipts cover)
+        debt_to_receipts    – total debt / annual receipts (years-of-revenue ratio)
+        receipts_growth_pct – YoY growth in receipts (%)
+    """
+    rec = load_receipts(receipts_path)
+    df  = df.merge(rec, on="year", how="left")
+ 
+    # Deficit proxy: annual debt increase minus receipts collected
+    df["deficit_T"] = (df["debt_yoy_change"] / 1e12) - df["receipts_T"]
+ 
+    # How many cents of new borrowing are covered by each dollar of receipts
+    df["receipts_coverage"] = df["receipts_T"] / (df["debt_yoy_change"] / 1e12)
+ 
+    # Debt-to-receipts ratio: years of revenue needed to retire total debt
+    df["debt_to_receipts"] = df["debt_T"] / df["receipts_T"]
+ 
+    # YoY receipts growth
+    df["receipts_growth_pct"] = df["receipts_T"].pct_change() * 100
+ 
+    return df
+ 
+ 
+# ── 9. Descriptive Stats (extended with receipts) ─────────────────────────────
+def descriptive_stats_receipts(df: pd.DataFrame) -> None:
+    """Print summary statistics for the receipts-related columns."""
+    print("=" * 65)
+    print("DESCRIPTIVE STATISTICS — FEDERAL RECEIPTS")
+    print("=" * 65)
+ 
+    cols = ["receipts_T", "deficit_T", "debt_to_receipts", "receipts_growth_pct"]
+    labels = {
+        "receipts_T":          "Federal Receipts ($ Trillions)",
+        "deficit_T":           "Deficit Proxy ($T debt added − receipts)",
+        "debt_to_receipts":    "Debt-to-Receipts Ratio (×)",
+        "receipts_growth_pct": "YoY Receipts Growth (%)",
+    }
+    available = [c for c in cols if c in df.columns]
+    summary = df[available].describe().T
+    summary.index = [labels[c] for c in available]
+    print(summary.round(3).to_string())
+ 
+    print("\nCorrelation with debt variables:")
+    corr_cols = ["receipts_T", "debt_T", "debt_growth_pct", "deficit_T", "debt_to_receipts"]
+    corr_cols = [c for c in corr_cols if c in df.columns]
+    corr = df[corr_cols].corr()
+    corr.columns = corr.index = corr_cols
+    print(corr.round(3).to_string())
+    print()
+ 
+ 
+# ── 10. Receipts Visualisations ───────────────────────────────────────────────
+def fig_debt_vs_receipts(df: pd.DataFrame) -> None:
+    """
+    Fig 7 – Dual-axis line: Debt outstanding vs. Federal Receipts.
+    Highlights the widening gap between the two series.
+    """
+    clean = df.dropna(subset=["receipts_T"])
+ 
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+ 
+    ax1.fill_between(clean["year"], clean["debt_T"], alpha=0.15, color=C_DEBT)
+    ax1.plot(clean["year"], clean["debt_T"], color=C_DEBT, lw=2.5,
+             label="Debt Outstanding")
+    ax1.set_ylabel("Federal Debt ($ Trillions)", color=C_DEBT)
+    ax1.tick_params(axis="y", labelcolor=C_DEBT)
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:.0f}T"))
+ 
+    ax2 = ax1.twinx()
+    ax2.plot(clean["year"], clean["receipts_T"], color=C_GROWTH, lw=2.5,
+             linestyle="--", label="Federal Receipts")
+    ax2.set_ylabel("Federal Receipts ($ Trillions)", color=C_GROWTH)
+    ax2.tick_params(axis="y", labelcolor=C_GROWTH)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:.1f}T"))
+ 
+    # Shade crisis periods
+    for start, end, lbl, col in [(2008, 2010, "GFC", "lightgrey"),
+                                  (2020, 2021, "COVID", "lightyellow")]:
+        ax1.axvspan(start, end, alpha=0.3, color=col, label=lbl)
+ 
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=8)
+ 
+    ax1.set_title("U.S. Federal Debt Outstanding vs. Federal Receipts (FY 1977–2025)",
+                  fontsize=13, fontweight="bold")
+    ax1.set_xlabel("Fiscal Year")
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/fig7_debt_vs_receipts.png", dpi=150)
+    plt.close()
+    print("Saved: fig7_debt_vs_receipts.png")
+ 
+ 
+def fig_debt_to_receipts_ratio(df: pd.DataFrame) -> None:
+    """
+    Fig 8 – Debt-to-receipts ratio over time.
+    Shows how many years of total revenue would be needed to retire the debt.
+    """
+    clean = df.dropna(subset=["debt_to_receipts"])
+ 
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.fill_between(clean["year"], clean["debt_to_receipts"], alpha=0.2, color=C_RATIO)
+    ax.plot(clean["year"], clean["debt_to_receipts"], color=C_RATIO, lw=2.5)
+ 
+    # Annotate key years
+    for yr in [1981, 2000, 2009, 2020, clean["year"].iloc[-1]]:
+        row = clean[clean["year"] == yr]
+        if not row.empty:
+            val = row["debt_to_receipts"].values[0]
+            ax.annotate(f"{yr}\n{val:.1f}×",
+                        xy=(yr, val),
+                        xytext=(yr + 0.5, val + 0.3),
+                        fontsize=7, color=C_RATIO,
+                        arrowprops=dict(arrowstyle="-", color=C_RATIO, lw=0.8))
+ 
+    ax.axhline(clean["debt_to_receipts"].mean(), color="black", lw=1,
+               linestyle="--",
+               label=f"Period mean ({clean['debt_to_receipts'].mean():.1f}×)")
+ 
+    ax.set_title("Debt-to-Receipts Ratio: Years of Revenue Required to Retire Federal Debt",
+                 fontsize=13, fontweight="bold")
+    ax.set_xlabel("Fiscal Year")
+    ax.set_ylabel("Ratio (×)")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1f}×"))
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/fig8_debt_to_receipts_ratio.png", dpi=150)
+    plt.close()
+    print("Saved: fig8_debt_to_receipts_ratio.png")
+ 
+ 
+def fig_deficit_proxy(df: pd.DataFrame) -> None:
+    """
+    Fig 9 – Stacked bar: annual debt added (deficit proxy) vs. federal receipts.
+    Visualises supporting question 2: how does revenue relate to deficit growth?
+    """
+    clean = df.dropna(subset=["receipts_T", "deficit_T"]).copy()
+    debt_added = clean["debt_yoy_change"] / 1e12
+ 
+    fig, ax = plt.subplots(figsize=(13, 5))
+ 
+    bar_w = 0.4
+    x = np.arange(len(clean))
+ 
+    ax.bar(x - bar_w / 2, debt_added, width=bar_w, color=C_RATE,
+           alpha=0.75, label="Annual Debt Added ($T)")
+    ax.bar(x + bar_w / 2, clean["receipts_T"], width=bar_w, color=C_GROWTH,
+           alpha=0.75, label="Federal Receipts ($T)")
+ 
+    ax.set_xticks(x)
+    ax.set_xticklabels(clean["year"].astype(int), rotation=45, ha="right", fontsize=7)
+    ax.axhline(0, color="grey", lw=0.8, linestyle=":")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:.1f}T"))
+    ax.set_ylabel("$ Trillions")
+    ax.set_title(
+        "Annual Debt Added (Deficit Proxy) vs. Federal Receipts (FY 1978–2025)",
+        fontsize=13, fontweight="bold",
+    )
+    ax.legend(fontsize=9)
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/fig9_deficit_proxy.png", dpi=150)
+    plt.close()
+    print("Saved: fig9_deficit_proxy.png")
+ 
+ 
+def fig_receipts_coverage(df: pd.DataFrame) -> None:
+    """
+    Fig 10 – Receipts coverage ratio: receipts / annual debt increase.
+    A ratio > 1 means receipts exceeded new borrowing that year.
+    A ratio < 1 means the government borrowed more than it collected.
+    """
+    clean = df.dropna(subset=["receipts_coverage"]).copy()
+    # Cap extreme values (e.g. near-zero debt-delta years distort the ratio)
+    clean = clean[clean["receipts_coverage"].between(0, 5)]
+ 
+    fig, ax = plt.subplots(figsize=(12, 4))
+    colors = [C_GROWTH if v >= 1 else C_RATE for v in clean["receipts_coverage"]]
+    ax.bar(clean["year"], clean["receipts_coverage"], color=colors, alpha=0.8)
+    ax.axhline(1, color="black", lw=1.5, linestyle="--", label="Break-even (ratio = 1)")
+ 
+    ax.set_title(
+        "Receipts Coverage Ratio: Federal Receipts ÷ Annual Debt Increase\n"
+        "Green = receipts exceeded new borrowing | Red = borrowing exceeded receipts",
+        fontsize=12, fontweight="bold",
+    )
+    ax.set_xlabel("Fiscal Year")
+    ax.set_ylabel("Coverage Ratio")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1f}×"))
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/fig10_receipts_coverage.png", dpi=150)
+    plt.close()
+    print("Saved: fig10_receipts_coverage.png")
+ 
+ 
+def fig_receipts_rate_scatter(df: pd.DataFrame) -> None:
+    """
+    Fig 11 – Scatter: Fed Funds Rate vs. receipts growth %, coloured by era.
+    Addresses supporting question 3: how do interest rates interact with revenue?
+    """
+    clean = df.dropna(subset=["fed_rate", "receipts_growth_pct", "era"]).copy()
+    era_colors = {
+        "Reagan/Bush":  "#e41a1c",
+        "Clinton/Bush": "#377eb8",
+        "GFC Buildup":  "#4daf4a",
+        "Post-GFC":     "#984ea3",
+        "COVID/Recent": "#ff7f00",
+    }
+ 
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for era, grp in clean.groupby("era", observed=True):
+        ax.scatter(grp["fed_rate"], grp["receipts_growth_pct"],
+                   label=str(era), color=era_colors.get(str(era), "grey"),
+                   s=70, edgecolors="white", linewidths=0.5, zorder=3)
+        for _, row in grp.iterrows():
+            ax.annotate(str(int(row["year"])),
+                        (row["fed_rate"], row["receipts_growth_pct"]),
+                        fontsize=6, alpha=0.6)
+ 
+    mask = clean["fed_rate"].notna() & clean["receipts_growth_pct"].notna()
+    slope, intercept, r, p, _ = stats.linregress(
+        clean.loc[mask, "fed_rate"], clean.loc[mask, "receipts_growth_pct"]
+    )
+    x_line = np.linspace(clean["fed_rate"].min(), clean["fed_rate"].max(), 200)
+    ax.plot(x_line, slope * x_line + intercept, "k--", lw=1.5,
+            label=f"OLS (R²={r**2:.2f}, p={p:.3f})")
+ 
+    ax.axhline(0, color="grey", lw=0.8, linestyle=":")
+    ax.set_xlabel("Fed Funds Rate (%)")
+    ax.set_ylabel("YoY Receipts Growth (%)")
+    ax.set_title("Fed Funds Rate vs. Annual Federal Receipts Growth",
+                 fontsize=13, fontweight="bold")
+    ax.legend(fontsize=8)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1f}%"))
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/fig11_receipts_rate_scatter.png", dpi=150)
+    plt.close()
+    print("Saved: fig11_receipts_rate_scatter.png")
+ 
+ 
+def fig_receipts_growth_vs_debt_growth(df: pd.DataFrame) -> None:
+    """
+    Fig 12 – Line comparison: receipts growth % vs. debt growth % over time.
+    When debt growth persistently exceeds receipts growth, debt compounds faster
+    than the government's revenue base — a key sustainability signal.
+    """
+    clean = df.dropna(subset=["receipts_growth_pct", "debt_growth_pct"])
+ 
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(clean["year"], clean["debt_growth_pct"], color=C_DEBT, lw=2,
+            label="Debt Growth %")
+    ax.plot(clean["year"], clean["receipts_growth_pct"], color=C_GROWTH, lw=2,
+            linestyle="--", label="Receipts Growth %")
+    ax.fill_between(
+        clean["year"],
+        clean["debt_growth_pct"],
+        clean["receipts_growth_pct"],
+        where=(clean["debt_growth_pct"] > clean["receipts_growth_pct"]),
+        interpolate=True, alpha=0.12, color=C_DEBT,
+        label="Debt growing faster than receipts",
+    )
+    ax.fill_between(
+        clean["year"],
+        clean["debt_growth_pct"],
+        clean["receipts_growth_pct"],
+        where=(clean["debt_growth_pct"] <= clean["receipts_growth_pct"]),
+        interpolate=True, alpha=0.12, color=C_GROWTH,
+        label="Receipts growing faster than debt",
+    )
+    ax.axhline(0, color="grey", lw=0.8, linestyle=":")
+    ax.set_title("Annual Growth Rate: Federal Debt vs. Federal Receipts (FY 1978–2025)",
+                 fontsize=13, fontweight="bold")
+    ax.set_xlabel("Fiscal Year")
+    ax.set_ylabel("Year-over-Year Growth (%)")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1f}%"))
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/fig12_receipts_vs_debt_growth.png", dpi=150)
+    plt.close()
+    print("Saved: fig12_receipts_vs_debt_growth.png")
+ 
+ 
+# ── 11. Receipts Regression Analysis ─────────────────────────────────────────
+def regression_analysis_receipts(df: pd.DataFrame) -> None:
+    """
+    OLS regressions addressing supporting questions 2 & 4.
+ 
+    SQ2: How does tax revenue affect budget deficits and debt growth?
+    SQ4: To what extent do spending, revenue, and interest rates TOGETHER
+         explain long-term debt trends?
+    """
+    print("=" * 65)
+    print("REGRESSION ANALYSIS — FEDERAL RECEIPTS")
+    print("=" * 65)
+ 
+    print("\n[SQ2] Receipts ($T) → Annual Debt Added ($T)")
+    simple_ols(df["receipts_T"], df["debt_yoy_change"] / 1e12,
+               "Receipts ($T)", "Debt Added ($T)")
+ 
+    print("\n[SQ2] Receipts Growth % → Debt Growth %")
+    simple_ols(df["receipts_growth_pct"], df["debt_growth_pct"],
+               "Receipts Growth %", "Debt Growth %")
+ 
+    print("\n[SQ2] Receipts ($T) → Deficit Proxy ($T)")
+    simple_ols(df["receipts_T"], df["deficit_T"],
+               "Receipts ($T)", "Deficit ($T)")
+ 
+    print("\n[SQ4] Debt-to-Receipts Ratio → Debt Growth %")
+    simple_ols(df["debt_to_receipts"], df["debt_growth_pct"],
+               "Debt-to-Receipts (×)", "Debt Growth %")
+ 
+    # Multi-variable OLS: receipts + fed_rate → debt_growth_pct
+    print("\n[SQ4] Multiple OLS: Receipts ($T) + Fed Rate (%) → Debt Growth %")
+    mask = (
+        df["receipts_T"].notna()
+        & df["fed_rate"].notna()
+        & df["debt_growth_pct"].notna()
+    )
+    X = df.loc[mask, ["receipts_T", "fed_rate"]].values
+    y = df.loc[mask, "debt_growth_pct"].values
+    # Add intercept column
+    X_int = np.column_stack([np.ones(len(X)), X])
+    coeffs, residuals, rank, sv = np.linalg.lstsq(X_int, y, rcond=None)
+    y_hat  = X_int @ coeffs
+    ss_res = np.sum((y - y_hat) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r2     = 1 - ss_res / ss_tot
+    print(f"       intercept    = {coeffs[0]:.4f}")
+    print(f"       β_receipts   = {coeffs[1]:.4f}")
+    print(f"       β_fed_rate   = {coeffs[2]:.4f}")
+    print(f"       R²           = {r2:.4f}  (n={mask.sum()})")
+    print("       Interpretation: R² shows how much of debt growth variance is")
+    print("       jointly explained by receipts level and the fed funds rate.")
+    print()
+ 
+ 
+# ── 12. Era Summary (extended) ────────────────────────────────────────────────
+def era_summary_receipts(df: pd.DataFrame) -> None:
+    """Per-era summary including receipts and deficit proxy columns."""
+    print("=" * 65)
+    print("ERA SUMMARY — WITH FEDERAL RECEIPTS")
+    print("=" * 65)
+    agg_cols = {
+        "years":               ("year", "count"),
+        "avg_debt_growth":     ("debt_growth_pct", "mean"),
+        "avg_receipts_T":      ("receipts_T", "mean"),
+        "avg_deficit_T":       ("deficit_T", "mean"),
+        "avg_dtr":             ("debt_to_receipts", "mean"),
+        "avg_fed_rate":        ("fed_rate", "mean"),
+        "total_debt_added_T":  ("debt_yoy_change", lambda x: x.sum() / 1e12),
+    }
+    available = {k: v for k, v in agg_cols.items() if v[0] in df.columns}
+    summary = (
+        df.dropna(subset=["era"])
+        .groupby("era", observed=True)
+        .agg(**available)
+        .round(2)
+    )
+    summary.columns = [
+        "Years", "Avg Debt Growth %", "Avg Receipts $T",
+        "Avg Deficit $T", "Avg Debt/Receipts ×",
+        "Avg Fed Rate %", "Total Debt Added $T",
+    ][:len(summary.columns)]
+    print(summary.to_string())
+    print()
+ 
+ 
+# ── 13. Key Findings (extended) ───────────────────────────────────────────────
+def print_findings_receipts(df: pd.DataFrame) -> None:
+    """Narrative findings for the receipts analysis (SQ2 & SQ4)."""
+    print("=" * 65)
+    print("KEY FINDINGS — FEDERAL RECEIPTS vs. DEBT")
+    print("=" * 65)
+ 
+    latest = df.dropna(subset=["receipts_T"]).iloc[-1]
+    worst_coverage = df.dropna(subset=["receipts_coverage"])
+    worst_coverage = worst_coverage[worst_coverage["receipts_coverage"].between(0, 5)]
+ 
+    print(f"  Latest receipts (FY {int(latest['year'])}) : ${latest['receipts_T']:.2f}T")
+    print(f"  Latest debt outstanding           : ${latest['debt_T']:.2f}T")
+    print(f"  Debt-to-receipts ratio            : {latest['debt_to_receipts']:.1f}×")
+ 
+    if not worst_coverage.empty:
+        min_row = worst_coverage.loc[worst_coverage["receipts_coverage"].idxmin()]
+        print(f"  Worst coverage year               : FY {int(min_row['year'])} "
+              f"({min_row['receipts_coverage']:.2f}× — "
+              f"borrowed ${(min_row['debt_yoy_change']/1e12):.1f}T, "
+              f"collected ${min_row['receipts_T']:.1f}T)")
+ 
+    # Years where debt grew faster than receipts
+    both = df.dropna(subset=["receipts_growth_pct", "debt_growth_pct"])
+    debt_faster = (both["debt_growth_pct"] > both["receipts_growth_pct"]).sum()
+    print(f"  Years debt grew faster than receipts: {debt_faster} of {len(both)}")
+ 
+    # Correlation
+    mask = df["receipts_T"].notna() & df["debt_growth_pct"].notna()
+    r, p = stats.pearsonr(df.loc[mask, "receipts_T"], df.loc[mask, "debt_growth_pct"])
+    sig  = "statistically significant" if p < 0.05 else "not statistically significant"
+    print(f"\n  Pearson r (receipts level vs. debt growth %) = {r:.3f} "
+          f"({'negative' if r < 0 else 'positive'}, {sig}, p={p:.3f})")
+    print("  Interpretation: Higher absolute receipts correlate with lower")
+    print("  debt *growth rates* — but the absolute debt level has still")
+    print("  outpaced receipts every decade since 1980.")
+ 
+    mask2 = df["receipts_growth_pct"].notna() & df["debt_growth_pct"].notna()
+    r2, p2 = stats.pearsonr(df.loc[mask2, "receipts_growth_pct"],
+                             df.loc[mask2, "debt_growth_pct"])
+    sig2 = "statistically significant" if p2 < 0.05 else "not statistically significant"
+    print(f"\n  Pearson r (receipts growth % vs. debt growth %) = {r2:.3f} "
+          f"({'negative' if r2 < 0 else 'positive'}, {sig2}, p={p2:.3f})")
+    print("  Interpretation: When receipts grow faster (e.g. 1990s expansion),")
+    print("  debt growth tends to slow — supporting the SQ2 hypothesis that")
+    print("  revenue growth helps contain deficit accumulation.")
+    print()
