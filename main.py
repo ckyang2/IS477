@@ -5,6 +5,7 @@ import pandas as pd
 import time
 from pathlib import Path
 from data_scraper import (fetch_fedfunds, load_historical_debt, build_annual_fedfunds, merge_datasets)
+
 from config import (
     FRED_API_KEY,
     DEBT_CSV_PATH,
@@ -25,7 +26,8 @@ from analysis import (
     fig_era_boxplot, 
     regression_analysis,
     era_summary,
-    print_findings)
+    print_findings
+)
 
 
 
