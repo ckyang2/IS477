@@ -8,7 +8,8 @@ Sources:
      https://fiscaldata.treasury.gov/datasets/historical-debt-outstanding/
 
 Both datasets are retrieved via their official public APIs (no API key required
-for Treasury; FRED works without a key but supports one for higher rate limits).
+for Treasury; FRED requires a API key and will require a input or update to FRED_API_KEY
+before running the code.
 
 Output:
   - fedfunds.csv              — raw Federal Funds rate data
@@ -23,16 +24,26 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# ── Optional: set your FRED API key here for higher rate limits ──────────────
-# Register free at https://fred.stlouisfed.org/docs/api/api_key.html
-# FRED_API_KEY = str(input())
-FRED_API_KEY = "2b05271cfc46ff0885edbc9ed0335246"   # leave empty to use the public (no-key) endpoint
-DEBT_CSV_PATH = "/Users/jonathanyang/Downloads/IS_477/HstDebt_17900101_20250930.csv"
+try:
+    from config import (
+    # Register free at https://fred.stlouisfed.org/docs/api/api_key.html
+        FRED_API_KEY,
+        DEBT_CSV_PATH,
 
-# ── Output file paths ────────────────────────────────────────────────────────
-OUTPUT_FEDFUNDS      = "fedfunds.csv"
-OUTPUT_DEBT          = "historical_debt.csv"
-OUTPUT_MERGED        = "merged_annual.csv"
+    # ── Output file paths ────────────────────────────────────────────────────────
+        OUTPUT_FEDFUNDS,
+        OUTPUT_DEBT,
+        OUTPUT_MERGED,
+    )
+except ImportError:
+    # Register free at https://fred.stlouisfed.org/docs/api/api_key.html
+    FRED_API_KEY = ""
+    DEBT_CSV_PATH = "HstDebt.csv"
+
+    # ── Output file paths ────────────────────────────────────────────────────────
+    OUTPUT_FEDFUNDS = "fedfunds.csv"
+    OUTPUT_DEBT = "historical_debt.csv"
+    OUTPUT_MERGED = "merged_annual.csv"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -41,61 +52,53 @@ OUTPUT_MERGED        = "merged_annual.csv"
  
 def fetch_fedfunds() -> pd.DataFrame:
     """
-    Retrieve the full FEDFUNDS series from the FRED API.
- 
+    Retrieve the FEDFUNDS series from the FRED API, filtered from 1977
+    to the most recent available year, aggregated as annual averages.
+
     Returns a DataFrame with columns:
-        date        – observation date (datetime)
-        fedfunds    – effective federal funds rate (%)
+        year        - observation year (int)
+        fedfunds    - annual average effective federal funds rate (%)
     """
     print("Fetching Federal Funds Effective Rate from FRED ...")
- 
-    if FRED_API_KEY:
-        url = (
-            "https://api.stlouisfed.org/fred/series/observations"
-            f"?series_id=FEDFUNDS&api_key={FRED_API_KEY}&file_type=json"
-        )
-    else:
-        # Publicly accessible JSON endpoint — no key needed
-        url = (
-            "https://fred.stlouisfed.org/graph/fredgraph.json"
-            "?id=FEDFUNDS"
-        )
- 
+
+    url = (
+        "https://api.stlouisfed.org/fred/series/observations?series_id="
+        f"FEDFUNDS&api_key={FRED_API_KEY}&file_type=json"
+    )
+
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     payload = resp.json()
- 
-    # ── Parse response depending on which endpoint was used ─────────────────
-    if FRED_API_KEY:
-        # Official API returns {"observations": [{"date": "...", "value": "..."}, ...]}
-        observations = payload.get("observations", [])
-        records = []
-        for obs in observations:
-            val = obs.get("value", ".")
-            if val == ".":      # FRED uses "." for missing values
-                continue
-            records.append({"date": obs["date"], "fedfunds": float(val)})
-        df = pd.DataFrame(records)
-        df["date"] = pd.to_datetime(df["date"])
-    else:
-        # Public endpoint returns a list of [timestamp_ms, value] pairs
-        obs_raw = payload.get("observations", payload)
-        records = []
-        for item in obs_raw:
-            ts_ms, val = item[0], item[1]
-            if val is None:
-                continue
-            records.append({
-                "date":     pd.to_datetime(ts_ms, unit="ms"),
-                "fedfunds": float(val),
-            })
-        df = pd.DataFrame(records)
- 
-    df = df.sort_values("date").reset_index(drop=True)
-    print(f"  -> {len(df):,} observations retrieved "
-          f"({df['date'].min().date()} - {df['date'].max().date()})")
+
+    observations = payload.get("observations", [])
+    records = []
+    for obs in observations:
+        val = obs.get("value", ".")
+        if val == ".":      # FRED uses "." for missing values
+            continue
+        records.append({"date": obs["date"], "fedfunds": float(val)})
+
+    df = pd.DataFrame(records)
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Filter to 1977 onward
+    df = df[df["date"].dt.year >= 1977]
+
+    # Aggregate to annual averages
+    df = (
+        df.groupby(df["date"].dt.year)["fedfunds"]
+        .mean()
+        .reset_index()
+        .rename(columns={"date": "year"})
+    )
+
+    df = df.sort_values("year").reset_index(drop=True)
+    df["fedfunds"] = df["fedfunds"].round(4)
+
+    print(f"  -> {len(df):,} annual observations retrieved "
+          f"({df['year'].min()} - {df['year'].max()})")
     return df
- 
+
  
 # ════════════════════════════════════════════════════════════════════════════
 # 2.  Local CSV — Historical Debt Outstanding
@@ -106,14 +109,14 @@ def load_historical_debt(csv_path: str = DEBT_CSV_PATH) -> pd.DataFrame:
     Load the Historical Debt Outstanding data from a local CSV file.
  
     Expected CSV columns (as downloaded from Treasury FiscalData):
-        Record Date             – date of the annual debt figure
-        Debt Outstanding Amount – total federal debt outstanding (USD)
+        Record Date             - date of the annual debt figure
+        Debt Outstanding Amount - total federal debt outstanding (USD)
  
     Returns a DataFrame with normalised columns:
-        record_date          – date (datetime)
-        debt_outstanding_amt – debt amount (float)
-        fiscal_year          – derived fiscal year (int)
-        fiscal_calendar_note – era label for the fiscal year calendar change
+        record_date          - date (datetime)
+        debt_outstanding_amt - debt amount (float)
+        fiscal_year          - derived fiscal year (int)
+        fiscal_calendar_note - era label for the fiscal year calendar change
     """
     path = Path(csv_path)
     if not path.exists():
@@ -174,35 +177,39 @@ def build_annual_fedfunds(df_ff: pd.DataFrame) -> pd.DataFrame:
     Aggregate the monthly FEDFUNDS series to an annual average,
     using the calendar year of each observation.
     """
-    df = df_ff.copy()
-    df["calendar_year"] = df["date"].dt.year
-    annual = (
-        df.groupby("calendar_year", as_index=False)
-          .agg(
-              fedfunds_annual_avg=("fedfunds", "mean"),
-              fedfunds_annual_min=("fedfunds", "min"),
-              fedfunds_annual_max=("fedfunds", "max"),
-          )
-    )
-    return annual
+    # df = df_ff.copy()
+    # df["calendar_year"] = df["date"].dt.year
+    # annual = (
+    #     df.groupby("calendar_year", as_index=False)
+    #       .agg(
+    #           fedfunds_annual_avg=("fedfunds", "mean"),
+    #           fedfunds_annual_min=("fedfunds", "min"),
+    #           fedfunds_annual_max=("fedfunds", "max"),
+    #       )
+    # )
+    # return annual
+    return df_ff.rename(columns={
+        "year": "calendar_year",
+        "fedfunds": "fedfunds_annual_avg"
+    })
  
  
-def merge_datasets(df_debt: pd.DataFrame,
-                   df_ff_annual: pd.DataFrame) -> pd.DataFrame:
+def merge_datasets(df_debt: pd.DataFrame, df_ff_annual: pd.DataFrame) -> pd.DataFrame:
     """
     Left-join the debt dataset with the annual FEDFUNDS aggregates on
     fiscal_year == calendar_year.
- 
+    
     NOTE on fiscal vs. calendar year alignment
     ------------------------------------------
     The Treasury's fiscal year end date has changed over time:
       - 1790-1842: FY ended Dec 31  -> FY == calendar year
       - 1843-1976: FY ended Jun 30  -> FY N covers Jul (N-1) through Jun N
       - 1977-now:  FY ended Sep 30  -> FY N covers Oct (N-1) through Sep N
- 
+    
     FEDFUNDS data only starts in 1954, so earlier debt rows will have
     NaN for the rate columns — expected and flagged via fiscal_calendar_note
-    for downstream cleaning.
+    for downstream cleaning. This code will only keep fiscal year 1977 and after as 
+    there is a change in reporting month.
     """
     merged = pd.merge(
         df_debt,
@@ -212,65 +219,5 @@ def merge_datasets(df_debt: pd.DataFrame,
         how="left",
     )
     merged = merged.drop(columns=["calendar_year"], errors="ignore")
+    merged = merged[merged["fiscal_year"] >= 1977].reset_index(drop=True)
     return merged
- 
- 
-# ════════════════════════════════════════════════════════════════════════════
-# 4.  Main
-# ════════════════════════════════════════════════════════════════════════════
- 
-def main():
-    print("=" * 60)
-    print("U.S. Federal Debt & Federal Funds Rate — Data Retriever")
-    print(f"Run timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
- 
-    # ── Fetch / load ─────────────────────────────────────────────────────────
-    try:
-        df_fedfunds = fetch_fedfunds()
-    except Exception as exc:
-        print(f"ERROR fetching FEDFUNDS: {exc}", file=sys.stderr)
-        raise
- 
-    try:
-        df_debt = load_historical_debt(DEBT_CSV_PATH)
-    except FileNotFoundError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
- 
-    # ── Save raw / cleaned files ─────────────────────────────────────────────
-    df_fedfunds.to_csv(OUTPUT_FEDFUNDS, index=False)
-    print(f"\nSaved FEDFUNDS data        -> {OUTPUT_FEDFUNDS}")
- 
-    df_debt.to_csv(OUTPUT_DEBT, index=False)
-    print(f"Saved Historical Debt data -> {OUTPUT_DEBT}")
- 
-    # ── Aggregate & merge ────────────────────────────────────────────────────
-    print("\nBuilding annual FEDFUNDS summary and merging ...")
-    df_ff_annual = build_annual_fedfunds(df_fedfunds)
-    df_merged    = merge_datasets(df_debt, df_ff_annual)
- 
-    df_merged.to_csv(OUTPUT_MERGED, index=False)
-    print(f"Saved merged annual dataset -> {OUTPUT_MERGED}")
- 
-    # ── Quick summary ────────────────────────────────────────────────────────
-    print("\n-- Merged dataset preview (most recent 10 rows) --")
-    pd.set_option("display.float_format", "{:,.2f}".format)
-    pd.set_option("display.max_columns", 10)
-    pd.set_option("display.width", 120)
-    print(df_merged.tail(10).to_string(index=False))
- 
-    print("\n-- Column dtypes --")
-    print(df_merged.dtypes)
- 
-    overlap = df_merged.dropna(subset=["fedfunds_annual_avg"])
-    print(f"\n-- Rows with FEDFUNDS data: {len(overlap)} "
-          f"(fiscal years {int(overlap['fiscal_year'].min())}-"
-          f"{int(overlap['fiscal_year'].max())}) --")
- 
-    print("\nDone.")
- 
- 
-if __name__ == "__main__":
-    main()
- 
