@@ -6,3 +6,4 @@ IS477_project_venv/
 config.py
 __pycache__/
 *.pyc.DS_Store
+__pycache__/
