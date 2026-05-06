@@ -4,3 +4,5 @@ cky2ssh
 IS477_project_venv/
 .DS_Store
 config.py
+__pycache__/
+*.pyc

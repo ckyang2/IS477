@@ -3,8 +3,6 @@ import sys
 import requests
 import pandas as pd
 import time
-import sys
-from datetime import datetime
 from pathlib import Path
 from data_scraper import (fetch_fedfunds, load_historical_debt, build_annual_fedfunds, merge_datasets)
 from config import (
@@ -12,8 +10,22 @@ from config import (
     DEBT_CSV_PATH,
     OUTPUT_FEDFUNDS,
     OUTPUT_DEBT,
-    OUTPUT_MERGED
+    OUTPUT_MERGED,
+    OUTPUT_ANALYSIS_DIR
 )
+from analysis import (
+    load_data, 
+    descriptive_stats, 
+    simple_ols, 
+    fig_debt_and_rate,
+    fig_debt_growth,
+    fig_interest_expense,
+    fig_scatter_rate_vs_growth,
+    fig_compounding, 
+    fig_era_boxplot, 
+    regression_analysis,
+    era_summary,
+    print_findings)
 
 
 
@@ -67,5 +79,29 @@ def main():
           f"{int(overlap['fiscal_year'].max())}) --")
  
     print("\nDone.")
+
+    print("\n========================================================")
+    print("  U.S. FEDERAL DEBT ANALYSIS")
+    print("========================================================\n")
+
+    df = load_data(OUTPUT_MERGED)
+
+    # ── Text outputs ──────────────────────────────────────────────────────────
+    descriptive_stats(df)
+    era_summary(df)
+    regression_analysis(df)
+    print_findings(df)
+
+    # ── Figures ───────────────────────────────────────────────────────────────
+    print("Generating figures...")
+    fig_debt_and_rate(df)
+    fig_debt_growth(df)
+    fig_interest_expense(df)
+    fig_scatter_rate_vs_growth(df)
+    fig_compounding(df)
+    fig_era_boxplot(df)
+
+    print("\nAll outputs written to:", OUTPUT_ANALYSIS_DIR)
+    print("Done.\n")
 if __name__ == "__main__":
     main()
